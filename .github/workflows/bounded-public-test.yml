@@ -29,6 +29,45 @@ jobs:
       TARGET_COMMIT: "${{ inputs.target_commit }}"
       PATCH_BASE64: "${{ inputs.patch_base64 }}"
     steps:
+      - name: Bind runner work and tool state to application data
+        shell: bash
+        run: |
+          set -euo pipefail
+          runner_workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          runner_data="$runner_workspace/data/logs/bounded-public-test-logs/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          runner_paths=("$runner_workspace/data" "$runner_workspace/data/logs"
+            "$runner_workspace/data/logs/bounded-public-test-logs" "$runner_data"
+            "$runner_data"/{npm-cache,pip-cache,python-user,cargo,go,go-cache,go-modules,cache,state,config,data,temporary})
+          for selected_path in "${runner_paths[@]}"; do
+            if [[ -e "$selected_path" || -L "$selected_path" ]]; then
+              [[ -d "$selected_path" && ! -L "$selected_path" && -O "$selected_path" ]] || exit 1
+            fi
+          done
+          mkdir -p "${runner_paths[@]}"
+          for selected_path in "${runner_paths[@]}"; do
+            [[ $(realpath -e "$selected_path") == "$selected_path" ]] || exit 1
+          done
+          [[ ! -e "$runner_data/work" && ! -L "$runner_data/work" ]]
+          [[ ! -e "$runner_data/candidate.diff" && ! -L "$runner_data/candidate.diff" ]]
+          {
+            printf 'RUNNER_DATA=%s\n' "$runner_data"
+            printf 'RUNNER_WORK=%s\n' "$runner_data/work"
+            printf 'RUNNER_PATCH=%s\n' "$runner_data/candidate.diff"
+            printf 'npm_config_cache=%s\n' "$runner_data/npm-cache"
+            printf 'PIP_CACHE_DIR=%s\n' "$runner_data/pip-cache"
+            printf 'PYTHONUSERBASE=%s\n' "$runner_data/python-user"
+            printf 'CARGO_HOME=%s\n' "$runner_data/cargo"
+            printf 'GOPATH=%s\n' "$runner_data/go"
+            printf 'GOCACHE=%s\n' "$runner_data/go-cache"
+            printf 'GOMODCACHE=%s\n' "$runner_data/go-modules"
+            printf 'XDG_CACHE_HOME=%s\n' "$runner_data/cache"
+            printf 'XDG_STATE_HOME=%s\n' "$runner_data/state"
+            printf 'XDG_CONFIG_HOME=%s\n' "$runner_data/config"
+            printf 'XDG_DATA_HOME=%s\n' "$runner_data/data"
+            printf 'TMPDIR=%s\n' "$runner_data/temporary"
+          } >> "$GITHUB_ENV"
+
       - name: Admit immutable public source
         shell: bash
         run: |
@@ -41,28 +80,28 @@ jobs:
             echo "REFUSED_MUTABLE_COMMIT"
             exit 64
           fi
-          git init --quiet work
-          git -C work remote add origin "https://github.com/${TARGET_REPOSITORY}.git"
-          git -C work -c protocol.file.allow=never fetch --quiet --depth=1 origin "$TARGET_COMMIT"
-          test "$(git -C work rev-parse FETCH_HEAD)" = "${TARGET_COMMIT,,}"
-          git -C work -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
+          git init --quiet "$RUNNER_WORK"
+          git -C "$RUNNER_WORK" remote add origin "https://github.com/${TARGET_REPOSITORY}.git"
+          git -C "$RUNNER_WORK" -c protocol.file.allow=never fetch --quiet --depth=1 origin "$TARGET_COMMIT"
+          test "$(git -C "$RUNNER_WORK" rev-parse FETCH_HEAD)" = "${TARGET_COMMIT,,}"
+          git -C "$RUNNER_WORK" -c advice.detachedHead=false checkout --quiet --detach FETCH_HEAD
 
       - name: Admit bounded candidate patch
         if: ${{ inputs.patch_base64 != '' }}
         shell: bash
         run: |
           set -euo pipefail
-          printf '%s' "$PATCH_BASE64" | base64 --decode > candidate.diff
-          patch_bytes=$(wc -c < candidate.diff)
+          printf '%s' "$PATCH_BASE64" | base64 --decode > "$RUNNER_PATCH"
+          patch_bytes=$(wc -c < "$RUNNER_PATCH")
           if (( patch_bytes > 49152 )); then
             echo "REFUSED_PATCH_TOO_LARGE"
             exit 64
           fi
-          git -C work apply --check ../candidate.diff
-          git -C work apply --whitespace=nowarn ../candidate.diff
+          git -C "$RUNNER_WORK" apply --check "$RUNNER_PATCH"
+          git -C "$RUNNER_WORK" apply --whitespace=nowarn "$RUNNER_PATCH"
 
       - name: Run one detected test harness
-        working-directory: work
+        working-directory: ${{ env.RUNNER_WORK }}
         shell: bash
         run: |
           set -euo pipefail
@@ -73,13 +112,18 @@ jobs:
             npm install --no-audit --no-fund
             npm test
           elif [[ -f pyproject.toml ]]; then
-            python -m pip install --disable-pip-version-check -e .
-            python -m pytest -q
+            python -m venv --system-site-packages "$RUNNER_DATA/python-environment"
+            "$RUNNER_DATA/python-environment/bin/python" -m pip install --disable-pip-version-check -e .
+            "$RUNNER_DATA/python-environment/bin/python" -m pytest -q
           elif [[ -f requirements.txt ]]; then
-            python -m pip install --disable-pip-version-check -r requirements.txt
-            python -m pytest -q
+            python -m venv --system-site-packages "$RUNNER_DATA/python-environment"
+            "$RUNNER_DATA/python-environment/bin/python" -m pip install --disable-pip-version-check -r requirements.txt
+            "$RUNNER_DATA/python-environment/bin/python" -m pytest -q
           elif [[ -f Cargo.toml ]]; then
-            cargo test --locked
+            # Select the installed compiler without letting rustup update its supplier home.
+            cargo_command=$(rustup which cargo)
+            export RUSTC="$(rustup which rustc)" RUSTDOC="$(rustup which rustdoc)"
+            "$cargo_command" test --locked
           elif [[ -f go.mod ]]; then
             go test ./...
           elif [[ -f Makefile ]] && grep -Eq '^[.]?PHONY:.*test|^test:' Makefile; then
