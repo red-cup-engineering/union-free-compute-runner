@@ -5,5 +5,14 @@
   "type": "module",
   "scripts": {
     "test": "node --test test/*.test.mjs"
+  },
+  "license": "MIT",
+  "funding": {
+    "type": "individual",
+    "url": "https://github.com/561-group/.github/blob/main/TIPS.md"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/red-cup-engineering/union-free-compute-runner.git"
   }
 }
