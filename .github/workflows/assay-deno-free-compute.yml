@@ -25,7 +25,32 @@ jobs:
       DENO_BASE_URL: "https://union-free-compute-assay.emsenn.deno.net"
       REQUEST_BODY: '{"text":"cedar fog"}'
     steps:
+      - name: Bind response logs to application data
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assay_workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          assay_data="$assay_workspace/data/logs/deno-assay-logs/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          assay_paths=("$assay_workspace/data" "$assay_workspace/data/logs"
+            "$assay_workspace/data/logs/deno-assay-logs" "$assay_data" "$assay_data/temporary")
+          for selected_path in "${assay_paths[@]}"; do
+            if [[ -e "$selected_path" || -L "$selected_path" ]]; then
+              [[ -d "$selected_path" && ! -L "$selected_path" && -O "$selected_path" ]] || exit 1
+            fi
+          done
+          mkdir -p "${assay_paths[@]}"
+          for selected_path in "${assay_paths[@]}"; do
+            [[ $(realpath -e "$selected_path") == "$selected_path" ]] || exit 1
+          done
+          for response in health.json unsigned.json signed.json; do
+            [[ ! -e "$assay_data/$response" && ! -L "$assay_data/$response" ]]
+          done
+          printf 'DENO_ASSAY_DATA=%s\nTMPDIR=%s\n' "$assay_data" "$assay_data/temporary" >> "$GITHUB_ENV"
+
       - name: Admit one short-lived assay signature
+        working-directory: ${{ env.DENO_ASSAY_DATA }}
         shell: bash
         run: |
           set -euo pipefail
@@ -33,6 +58,7 @@ jobs:
           [[ "$ONE_REQUEST_SIGNATURE" =~ ^[A-Za-z0-9_-]{86}$ ]]
 
       - name: Prove public health from outside the customer ISP
+        working-directory: ${{ env.DENO_ASSAY_DATA }}
         shell: bash
         run: |
           set -euo pipefail
@@ -44,6 +70,7 @@ jobs:
           '
 
       - name: Prove unsigned computation is refused
+        working-directory: ${{ env.DENO_ASSAY_DATA }}
         shell: bash
         run: |
           set -euo pipefail
@@ -60,6 +87,7 @@ jobs:
           '
 
       - name: Prove signed bounded PBKDF2 compute
+        working-directory: ${{ env.DENO_ASSAY_DATA }}
         shell: bash
         run: |
           set -euo pipefail
