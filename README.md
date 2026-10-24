@@ -18,7 +18,7 @@ Do not submit proprietary source, secrets, personal data, or secret-bearing test
 ## Source ownership and writable data
 
 Continuous Delivery owns this application:
-https://github.com/red-cup-engineering/continuous-delivery-services-section .
+https://github.com/red-cup-engineering/continuous-delivery-engineering-services-section .
 Its canonical source is https://github.com/red-cup-engineering/union-free-compute-runner .
 The original repository identity, tag and three manual assays are preserved.
 The retired pinned automatic branch-intake caller is removed under its original
