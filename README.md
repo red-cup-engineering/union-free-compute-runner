@@ -25,6 +25,18 @@ and validates the payload before receiving public source. Manual
 `workflow_dispatch` accepts the same inputs.
 
 
+For patches above the inline API payload limit, create at most six input
+deployments at the same workflow SHA. Their task and environment are
+`bounded-public-test-input`, with the same transient/non-production flags.
+Each payload is exactly `{index, data}`, with zero-based ordinal and a canonical
+base64 segment of at most 12,000 characters on a four-character boundary.
+The final test payload supplies `patch_deployment_ids` in order,
+`patch_sha256` and `patch_bytes` in place of `patch_base64`. The runner reads
+these public inputs from its own GitHub repository, verifies their identities,
+and admits the assembled patch only after its exact byte count and SHA-256
+match. The decoded patch limit remains 48 KiB.
+
+
 ## Source ownership and writable data
 
 Continuous Delivery owns this application:

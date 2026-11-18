@@ -40,19 +40,18 @@ jobs:
           python3 - <<'PY'
           import base64
           import binascii
+          import hashlib
           import json
           import os
           import re
+          import urllib.error
+          import urllib.request
 
-          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as source:
-              event = json.load(source)
-          event_name = os.environ["GITHUB_EVENT_NAME"]
-          if event_name == "deployment":
-              deployment = event.get("deployment")
+          def admit_deployment(deployment, task):
               if not isinstance(deployment, dict):
                   raise SystemExit("REFUSED_INVALID_DEPLOYMENT")
-              if (deployment.get("task") != "bounded-public-test" or
-                  deployment.get("environment") != "bounded-public-test" or
+              if (deployment.get("task") != task or
+                  deployment.get("environment") != task or
                   deployment.get("production_environment") is not False or
                   deployment.get("transient_environment") is not True):
                   raise SystemExit("REFUSED_DEPLOYMENT_SCOPE")
@@ -62,23 +61,80 @@ jobs:
                   revision.lower() != str(deployment.get("sha", "")).lower() or
                   revision.lower() != os.environ["GITHUB_SHA"].lower()):
                   raise SystemExit("REFUSED_WORKFLOW_REVISION")
+
+          with open(os.environ["GITHUB_EVENT_PATH"], encoding="utf-8") as source:
+              event = json.load(source)
+          event_name = os.environ["GITHUB_EVENT_NAME"]
+          if event_name == "deployment":
+              deployment = event.get("deployment")
+              admit_deployment(deployment, "bounded-public-test")
               inputs = deployment.get("payload")
           elif event_name == "workflow_dispatch":
               inputs = event.get("inputs")
           else:
               raise SystemExit("REFUSED_DISPATCH_EVENT")
+          chunk_fields = {"patch_deployment_ids", "patch_sha256", "patch_bytes"}
           if (not isinstance(inputs, dict) or
               not {"target_repository", "target_commit"}.issubset(inputs) or
-              set(inputs) - {"target_repository", "target_commit", "patch_base64"}):
+              set(inputs) - {"target_repository", "target_commit", "patch_base64"} - chunk_fields):
               raise SystemExit("REFUSED_INVALID_INPUT")
           repository = inputs["target_repository"]
           commit = inputs["target_commit"]
-          patch = inputs.get("patch_base64", "")
           if (not isinstance(repository, str) or
               not re.fullmatch(r"[A-Za-z0-9_.-]+/[A-Za-z0-9_.-]+", repository)):
               raise SystemExit("REFUSED_INVALID_REPOSITORY")
           if not isinstance(commit, str) or not re.fullmatch(r"[0-9a-fA-F]{40}", commit):
               raise SystemExit("REFUSED_MUTABLE_COMMIT")
+          if chunk_fields.intersection(inputs):
+              if not chunk_fields.issubset(inputs) or "patch_base64" in inputs:
+                  raise SystemExit("REFUSED_PATCH_INPUT_SHAPE")
+              deployment_ids = inputs["patch_deployment_ids"]
+              expected_bytes = inputs["patch_bytes"]
+              expected_digest = inputs["patch_sha256"]
+              if (not isinstance(deployment_ids, list) or
+                  not 1 <= len(deployment_ids) <= 6 or
+                  any(type(value) is not int or value <= 0 for value in deployment_ids) or
+                  len(set(deployment_ids)) != len(deployment_ids) or
+                  type(expected_bytes) is not int or not 1 <= expected_bytes <= 49152 or
+                  not isinstance(expected_digest, str) or
+                  not re.fullmatch(r"[0-9a-f]{64}", expected_digest)):
+                  raise SystemExit("REFUSED_PATCH_INPUT_SHAPE")
+              chunks = []
+              for index, deployment_id in enumerate(deployment_ids):
+                  url = f"https://api.github.com/repos/{os.environ['GITHUB_REPOSITORY']}/deployments/{deployment_id}"
+                  request = urllib.request.Request(url, headers={
+                      "Accept": "application/vnd.github+json",
+                      "X-GitHub-Api-Version": "2022-11-28",
+                      "User-Agent": "union-free-compute-runner",
+                  })
+                  try:
+                      with urllib.request.urlopen(request, timeout=10) as response:
+                          received = response.read(65537)
+                      if len(received) > 65536:
+                          raise ValueError("oversized deployment response")
+                      part = json.loads(received)
+                  except (OSError, ValueError, urllib.error.URLError):
+                      raise SystemExit("REFUSED_PATCH_INPUT_FETCH")
+                  admit_deployment(part, "bounded-public-test-input")
+                  fragment = part.get("payload")
+                  if (type(part.get("id")) is not int or part["id"] != deployment_id or
+                      not isinstance(fragment, dict) or set(fragment) != {"index", "data"} or
+                      type(fragment["index"]) is not int or fragment["index"] != index):
+                      raise SystemExit("REFUSED_PATCH_INPUT_IDENTITY")
+                  data = fragment["data"]
+                  if (not isinstance(data, str) or not 1 <= len(data) <= 12000 or
+                      len(data) % 4):
+                      raise SystemExit("REFUSED_PATCH_INPUT_ENCODING")
+                  try:
+                      chunk = base64.b64decode(data, validate=True)
+                  except (ValueError, binascii.Error):
+                      raise SystemExit("REFUSED_PATCH_INPUT_ENCODING")
+                  if base64.b64encode(chunk).decode("ascii") != data:
+                      raise SystemExit("REFUSED_PATCH_INPUT_ENCODING")
+                  chunks.append(data)
+              patch = "".join(chunks)
+          else:
+              patch = inputs.get("patch_base64", "")
           if not isinstance(patch, str) or len(patch) > 65536:
               raise SystemExit("REFUSED_PATCH_TOO_LARGE")
           if event_name == "workflow_dispatch":
@@ -89,6 +145,10 @@ jobs:
               raise SystemExit("REFUSED_INVALID_PATCH_ENCODING")
           if len(decoded) > 49152:
               raise SystemExit("REFUSED_PATCH_TOO_LARGE")
+          if chunk_fields.intersection(inputs) and (
+              len(decoded) != expected_bytes or hashlib.sha256(decoded).hexdigest() != expected_digest
+          ):
+              raise SystemExit("REFUSED_PATCH_INPUT_DIGEST")
           with open(os.environ["GITHUB_ENV"], "a", encoding="utf-8") as target:
               target.write(f"TARGET_REPOSITORY={repository}\nTARGET_COMMIT={commit.lower()}\nPATCH_BASE64={patch}\n")
           PY
