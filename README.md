@@ -15,12 +15,22 @@ public repository and an optional patch of at most 48 KiB, uses a standard
 Do not submit proprietary source, secrets, personal data, or secret-bearing tests.
 
 
+The commit-pinned entrance creates a deployment at the exact 40-hex workflow
+commit with task and environment `bounded-public-test`,
+`production_environment: false`, `transient_environment: true`,
+`auto_merge: false` and `required_contexts: []`. Its payload supplies
+`target_repository`, `target_commit` and optional `patch_base64`.
+The runner checks that the deployed SHA matches its executing workflow revision
+and validates the payload before receiving public source. Manual
+`workflow_dispatch` accepts the same inputs.
+
+
 ## Source ownership and writable data
 
 Continuous Delivery owns this application:
 https://github.com/red-cup-engineering/continuous-delivery-engineering-services-section .
 Its canonical source is https://github.com/red-cup-engineering/union-free-compute-runner .
-The original repository identity, tag and three manual assays are preserved.
+The original repository identity and three manual assays are preserved.
 The retired pinned automatic branch-intake caller is removed under its original
 Continuous Delivery retirement contract; it is not a test or dispatch entrance.
 
