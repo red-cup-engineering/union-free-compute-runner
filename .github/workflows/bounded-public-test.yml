@@ -23,6 +23,8 @@ permissions: {}
 
 jobs:
   test:
+    env:
+      npm_config_registry: https://registry.561.group/
     if: >-
       github.event_name == 'workflow_dispatch' ||
       (github.event_name == 'deployment' &&
