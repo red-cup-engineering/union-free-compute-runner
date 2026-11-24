@@ -1,0 +1,106 @@
+name: assay-deno-free-compute
+run-name: assay Deno free compute from external runner
+
+on:
+  workflow_dispatch:
+    inputs:
+      timestamp:
+        description: Signed UTC epoch second, valid for 60 seconds
+        required: true
+        type: string
+      signature:
+        description: One-request Ed25519 base64url signature
+        required: true
+        type: string
+
+permissions: {}
+
+jobs:
+  assay:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    env:
+      SIGNED_TIMESTAMP: "${{ inputs.timestamp }}"
+      ONE_REQUEST_SIGNATURE: "${{ inputs.signature }}"
+      DENO_BASE_URL: "https://union-free-compute-assay.emsenn.deno.net"
+      REQUEST_BODY: '{"text":"cedar fog"}'
+    steps:
+      - name: Bind response logs to application data
+        working-directory: ${{ github.workspace }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          assay_workspace=$(realpath -e "$GITHUB_WORKSPACE")
+          [[ "$GITHUB_RUN_ID" =~ ^[0-9]+$ && "$GITHUB_RUN_ATTEMPT" =~ ^[0-9]+$ ]]
+          assay_data="$assay_workspace/data/logs/deno-assay-logs/$GITHUB_RUN_ID-$GITHUB_RUN_ATTEMPT"
+          assay_paths=("$assay_workspace/data" "$assay_workspace/data/logs"
+            "$assay_workspace/data/logs/deno-assay-logs" "$assay_data" "$assay_data/temporary")
+          for selected_path in "${assay_paths[@]}"; do
+            if [[ -e "$selected_path" || -L "$selected_path" ]]; then
+              [[ -d "$selected_path" && ! -L "$selected_path" && -O "$selected_path" ]] || exit 1
+            fi
+          done
+          mkdir -p "${assay_paths[@]}"
+          for selected_path in "${assay_paths[@]}"; do
+            [[ $(realpath -e "$selected_path") == "$selected_path" ]] || exit 1
+          done
+          for response in health.json unsigned.json signed.json; do
+            [[ ! -e "$assay_data/$response" && ! -L "$assay_data/$response" ]]
+          done
+          printf 'DENO_ASSAY_DATA=%s\nTMPDIR=%s\n' "$assay_data" "$assay_data/temporary" >> "$GITHUB_ENV"
+
+      - name: Admit one short-lived assay signature
+        working-directory: ${{ env.DENO_ASSAY_DATA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          [[ "$SIGNED_TIMESTAMP" =~ ^[0-9]{10}$ ]]
+          [[ "$ONE_REQUEST_SIGNATURE" =~ ^[A-Za-z0-9_-]{86}$ ]]
+
+      - name: Prove public health from outside the customer ISP
+        working-directory: ${{ env.DENO_ASSAY_DATA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --silent --show-error --fail --max-time 20 "$DENO_BASE_URL/health" > health.json
+          node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync("health.json", "utf8"));
+            if (value.status !== "ready" || value.planAdmission !== "free_verified-required" || value.state !== "ephemeral") process.exit(1);
+          '
+
+      - name: Prove unsigned computation is refused
+        working-directory: ${{ env.DENO_ASSAY_DATA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          status=$(curl --silent --show-error --max-time 20 \
+            --output unsigned.json --write-out '%{http_code}' \
+            --header 'content-type: application/json' \
+            --data-binary "$REQUEST_BODY" \
+            "$DENO_BASE_URL/v1/pbkdf2")
+          test "$status" = "401"
+          node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync("unsigned.json", "utf8"));
+            if (value.error !== "invalid-signature") process.exit(1);
+          '
+
+      - name: Prove signed bounded PBKDF2 compute
+        working-directory: ${{ env.DENO_ASSAY_DATA }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          curl --silent --show-error --fail --max-time 20 \
+            --header 'content-type: application/json' \
+            --header "x-union-timestamp: $SIGNED_TIMESTAMP" \
+            --header "x-union-signature: $ONE_REQUEST_SIGNATURE" \
+            --data-binary "$REQUEST_BODY" \
+            "$DENO_BASE_URL/v1/pbkdf2" > signed.json
+          node -e '
+            const fs = require("node:fs");
+            const value = JSON.parse(fs.readFileSync("signed.json", "utf8"));
+            if (value.algorithm !== "pbkdf2-hmac-sha256") process.exit(1);
+            if (value.iterations !== 120000 || value.outputBytes !== 32 || value.inputBytes !== 9) process.exit(1);
+            if (value.digestHex !== "cb415a983d565f6077b4ba7dd2ce29182472d6685c537d045157d1e3072a4b86") process.exit(1);
+          '
